@@ -31,7 +31,7 @@
 NAME	  = gen_sdl2
 
 CC        = gcc
-CFLAGS    = `sdl2-config --cflags` -march=native -O6 -fomit-frame-pointer -Wall -Wno-strict-aliasing -std=c99 -pedantic-errors
+CFLAGS    = `sdl2-config --cflags` -march=native -O6 -fomit-frame-pointer -Wall -Wno-strict-aliasing -std=c99 -pedantic-errors -D_POSIX_C_SOURCE=200809L
 #-g -ggdb -pg
 #-fomit-frame-pointer
 #LDFLAGS   = -pg
@@ -51,7 +51,7 @@ endif
 
 SRCDIR    = ../core
 INCLUDES  = -I$(SRCDIR) -I$(SRCDIR)/z80 -I$(SRCDIR)/m68k -I$(SRCDIR)/sound -I$(SRCDIR)/input_hw -I$(SRCDIR)/cart_hw -I$(SRCDIR)/cart_hw/svp -I$(SRCDIR)/cd_hw -I$(SRCDIR)/ntsc -I$(SRCDIR)/tremor -I$(SRCDIR)/../sdl -I$(SRCDIR)/../sdl/sdl2
-LIBS	  = `sdl2-config --libs` -lz -lm
+LIBS	  = `sdl2-config --libs` -lz -lm -lrt
 
 CHDLIBDIR = $(SRCDIR)/cd_hw/libchdr
 

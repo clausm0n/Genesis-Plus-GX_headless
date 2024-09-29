@@ -4,12 +4,61 @@
 #include "shared.h"
 #include "sms_ntsc.h"
 #include "md_ntsc.h"
+#include "system.h"
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <time.h>
+
+
+#define SOUND_SHARED_MEM_NAME "/genesis_sound"
+#define SOUND_SAMPLES_SIZE 2048  // Number of samples per channel
+#define SOUND_CHANNELS 2         // Stereo
+#define SOUND_BUFFER_SIZE (SOUND_SAMPLES_SIZE * SOUND_CHANNELS)
 #define SOUND_FREQUENCY 48000
-#define SOUND_SAMPLES_SIZE  2048
 
-#define VIDEO_WIDTH  320
+#define FRAME_RATE 60
+#define FRAME_TIME_US (1000000 / FRAME_RATE)
+#define FRAME_WIDTH 320
+#define FRAME_HEIGHT 240
+#define VIDEO_WIDTH 320
 #define VIDEO_HEIGHT 240
+
+#define SHARED_MEM_NAME "/genesis_frame"
+#define FRAME_SIZE (FRAME_WIDTH * FRAME_HEIGHT * 4)
+
+#define INPUT_SHARED_MEM_NAME "/genesis_input"
+#define INPUT_SIZE sizeof(uint16)
+
+#define CONTROL_SHARED_MEM_NAME "/genesis_control"
+#define CONTROL_SIZE sizeof(int)
+
+#ifndef usleep
+#define usleep(x) SDL_Delay((x)/1000)
+#endif
+
+// Function prototypes
+static int setup_input_shared_memory(void);
+void input_refresh(void);  // Declare the input_refresh function
+static void read_external_input(void);
+static void output_frame_data(void);
+static void output_sound_data(void);
+
+// Global variable
+static int running = 1;
+
+static int shared_mem_fd;
+static void *shared_mem_ptr;
+
+static int input_shared_mem_fd;
+static void *input_shared_mem_ptr;
+
+static int control_shared_mem_fd;
+static void *control_shared_mem_ptr;
 
 int joynum = 0;
 
@@ -28,6 +77,16 @@ struct {
   Uint32 frames_rendered;
 } sdl_video;
 
+// Replace fread calls with this function
+static int safe_fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
+    size_t read = fread(ptr, size, nmemb, stream);
+    if (read != nmemb) {
+        fprintf(stderr, "fread failed: expected %zu items, got %zu\n", nmemb, read);
+        return 0;
+    }
+    return 1;
+}
+
 /* sound */
 
 struct {
@@ -35,6 +94,14 @@ struct {
   char* buffer;
   int current_emulated_samples;
 } sdl_sound;
+
+typedef struct {
+    int sample_count;                  // Number of samples written
+    short samples[SOUND_BUFFER_SIZE];  // Audio samples (stereo)
+} sound_shared_mem_t;
+
+static int sound_shared_mem_fd = -1;
+static sound_shared_mem_t *sound_shared_mem_ptr = NULL;
 
 
 static uint8 brm_format[0x40] =
@@ -155,6 +222,294 @@ static int sdl_video_init()
   SDL_ShowCursor(0);
   return 1;
 }
+
+static int headless_video_init()
+{
+    bitmap.width = 320;
+    bitmap.height = 224;
+    bitmap.pitch = bitmap.width * 2;  // 16 bits per pixel (RGB565)
+    bitmap.data = malloc(bitmap.pitch * bitmap.height);
+    if (!bitmap.data) {
+        fprintf(stderr, "Failed to allocate frame buffer\n");
+        return 0;
+    }
+    bitmap.viewport.w = bitmap.width;
+    bitmap.viewport.h = bitmap.height;
+    bitmap.viewport.x = 0;
+    bitmap.viewport.y = 0;
+    bitmap.viewport.changed = 3;
+
+    printf("Initialized bitmap: %dx%d, pitch: %d\n", 
+           bitmap.width, bitmap.height, bitmap.pitch);
+
+    return 1;
+}
+
+void handle_control_commands() {
+    int command;
+    memcpy(&command, control_shared_mem_ptr, CONTROL_SIZE);
+    if (command == 1) {
+        // Save state
+        FILE *f = fopen("game.gp0", "wb");
+        if (f) {
+            uint8 buf[STATE_SIZE];
+            int len = state_save(buf);
+            fwrite(&len, sizeof(int), 1, f);  // Write the length first
+            fwrite(buf, len, 1, f);           // Then write the state data
+            fclose(f);
+            printf("State saved with size: %d bytes.\n", len);
+        } else {
+            perror("Failed to open save state file for writing");
+        }
+        // Clear command
+        int zero_command = 0;
+        memcpy(control_shared_mem_ptr, &zero_command, CONTROL_SIZE);
+    }
+
+    else if (command == 2) {
+        // Load state
+        FILE *f = fopen("game.gp0", "rb");
+        if (f) {
+            int len;
+            size_t read_len = fread(&len, sizeof(int), 1, f);
+            if (read_len == 1) {
+                uint8 *buf = malloc(len);
+                if (buf) {
+                    size_t read = fread(buf, 1, len, f);
+                    if (read == len) {
+                        state_load(buf);
+                        printf("State loaded with size: %d bytes.\n", len);
+                    } else {
+                        fprintf(stderr, "fread failed: expected %d bytes, got %zu\n", len, read);
+                    }
+                    free(buf);
+                } else {
+                    fprintf(stderr, "Failed to allocate memory for state buffer.\n");
+                }
+            } else {
+                fprintf(stderr, "Failed to read state length.\n");
+            }
+            fclose(f);
+        } else {
+            perror("Failed to open save state file for reading");
+        }
+        // Clear command
+        int zero_command = 0;
+        memcpy(control_shared_mem_ptr, &zero_command, CONTROL_SIZE);
+    }
+    else if (command == 3) {
+        // Reset emulator
+        system_reset();
+        printf("Emulator reset.\n");
+        
+        // Clear command
+        int zero_command = 0;
+        memcpy(control_shared_mem_ptr, &zero_command, CONTROL_SIZE);
+    }
+}
+
+
+static void headless_main_loop() {
+    struct timespec start, end;
+    long elapsed_us;
+
+    while (running) {
+        clock_gettime(CLOCK_MONOTONIC, &start);
+
+        // Handle control commands
+        handle_control_commands();
+
+        // Frame processing
+        if (system_hw == SYSTEM_MCD) {
+            system_frame_scd(0);
+        } else if ((system_hw & SYSTEM_PBC) == SYSTEM_MD) {
+            system_frame_gen(0);
+        } else {
+            system_frame_sms(0);
+        }
+        
+        // Output frame data to shared memory
+        output_frame_data();
+
+        // Output sound data to shared memory
+        output_sound_data();
+
+        clock_gettime(CLOCK_MONOTONIC, &end);
+        elapsed_us = (end.tv_sec - start.tv_sec) * 1000000 + (end.tv_nsec - start.tv_nsec) / 1000;
+
+        if (elapsed_us < FRAME_TIME_US) {
+            usleep(FRAME_TIME_US - elapsed_us);
+        }
+    }
+}
+
+static void output_frame_data() {
+    uint8_t *src = (uint8_t*)bitmap.data;
+    uint8_t *dst = (uint8_t*)shared_mem_ptr;
+    int width = 320;
+    int height = 224;
+    int src_pitch = bitmap.pitch;
+    int bytes_per_pixel = 2;  // 16 bits per pixel (RGB565)
+
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            int src_offset = (y * src_pitch) + (x * bytes_per_pixel);
+            int dst_offset = (y * width + x) * 4;
+
+            uint16_t pixel = *(uint16_t*)(src + src_offset);
+            uint8_t r = (pixel >> 11) & 0x1F;
+            uint8_t g = (pixel >> 5) & 0x3F;
+            uint8_t b = pixel & 0x1F;
+
+            // Expand to 8-bit values
+            r = (r << 3) | (r >> 2);
+            g = (g << 2) | (g >> 4);
+            b = (b << 3) | (b >> 2);
+
+            dst[dst_offset]     = r;     // R
+            dst[dst_offset + 1] = g;     // G
+            dst[dst_offset + 2] = b;     // B
+            dst[dst_offset + 3] = 0xFF;  // A
+        }
+    }
+}
+
+static void output_sound_data(void) {
+    // Assuming `audio_update` fills `soundframe` and returns the number of samples per channel
+    int num_samples = audio_update(soundframe); // Number of samples per channel
+
+    // Ensure we don't exceed the buffer size
+    if (num_samples > SOUND_SAMPLES_SIZE) {
+        num_samples = SOUND_SAMPLES_SIZE;
+    }
+
+    // Populate the shared memory structure
+    sound_shared_mem_t sound_data;
+    sound_data.sample_count = num_samples;
+
+    // Copy the sound samples (stereo interleaved)
+    memcpy(sound_data.samples, soundframe, num_samples * SOUND_CHANNELS * sizeof(short));
+
+    // Write the sound data to shared memory
+    if (sound_shared_mem_ptr) {
+        memcpy(sound_shared_mem_ptr, &sound_data, sizeof(sound_shared_mem_t));
+    }
+}
+
+
+void input_refresh(void)
+{
+    uint16 pad_data;
+    memcpy(&pad_data, input_shared_mem_ptr, INPUT_SIZE);
+    input.pad[0] = pad_data;  // Assuming we're only handling player 1 input
+}
+
+static int setup_sound_shared_memory(void) {
+    // Open or create the shared memory segment
+    sound_shared_mem_fd = shm_open(SOUND_SHARED_MEM_NAME, O_CREAT | O_RDWR, 0666);
+    if (sound_shared_mem_fd == -1) {
+        perror("shm_open for sound");
+        return 0;
+    }
+
+    // Set the size of the shared memory segment
+    if (ftruncate(sound_shared_mem_fd, sizeof(sound_shared_mem_t)) == -1) {
+        perror("ftruncate for sound");
+        return 0;
+    }
+
+    // Map the shared memory segment into the process's address space
+    sound_shared_mem_ptr = mmap(0, sizeof(sound_shared_mem_t), PROT_WRITE, MAP_SHARED, sound_shared_mem_fd, 0);
+    if (sound_shared_mem_ptr == MAP_FAILED) {
+        perror("mmap for sound");
+        return 0;
+    }
+
+    // Initialize the shared memory with zeroes
+    memset(sound_shared_mem_ptr, 0, sizeof(sound_shared_mem_t));
+
+    return 1;
+}
+
+
+static int setup_control_shared_memory() {
+    control_shared_mem_fd = shm_open(CONTROL_SHARED_MEM_NAME, O_CREAT | O_RDWR, 0666);
+    if (control_shared_mem_fd == -1) {
+        perror("shm_open for control");
+        return 0;
+    }
+
+    if (ftruncate(control_shared_mem_fd, CONTROL_SIZE) == -1) {
+        perror("ftruncate for control");
+        return 0;
+    }
+
+    control_shared_mem_ptr = mmap(0, CONTROL_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, control_shared_mem_fd, 0);
+    if (control_shared_mem_ptr == MAP_FAILED) {
+        perror("mmap for control");
+        return 0;
+    }
+
+    // Initialize control to 0
+    memset(control_shared_mem_ptr, 0, CONTROL_SIZE);
+
+    return 1;
+}
+
+
+static int setup_input_shared_memory() {
+  input_shared_mem_fd = shm_open(INPUT_SHARED_MEM_NAME, O_CREAT | O_RDWR, 0666);
+  if (input_shared_mem_fd == -1) {
+    perror("shm_open for input");
+    return 0;
+  }
+  
+  if (ftruncate(input_shared_mem_fd, INPUT_SIZE) == -1) {
+    perror("ftruncate for input");
+    return 0;
+  }
+  
+  input_shared_mem_ptr = mmap(0, INPUT_SIZE, PROT_READ, MAP_SHARED, input_shared_mem_fd, 0);
+  if (input_shared_mem_ptr == MAP_FAILED) {
+    perror("mmap for input");
+    return 0;
+  }
+  
+  return 1;
+}
+
+static void read_external_input() {
+    uint16 pad_data;
+    memcpy(&pad_data, input_shared_mem_ptr, INPUT_SIZE);
+    input.pad[0] = pad_data;  // Assuming we're only handling player 1 input
+}
+
+
+
+static int setup_shared_memory() {
+  shared_mem_fd = shm_open(SHARED_MEM_NAME, O_CREAT | O_RDWR, 0666);
+  if (shared_mem_fd == -1) {
+    perror("shm_open");
+    return 0;
+  }
+  
+  if (ftruncate(shared_mem_fd, FRAME_SIZE) == -1) {
+    perror("ftruncate");
+    return 0;
+  }
+  
+  shared_mem_ptr = mmap(0, FRAME_SIZE, PROT_WRITE, MAP_SHARED, shared_mem_fd, 0);
+  if (shared_mem_ptr == MAP_FAILED) {
+    perror("mmap");
+    return 0;
+  }
+  
+  return 1;
+}
+
+// static void output_frame_data() {
+//   memcpy(shared_mem_ptr, bitmap.data, FRAME_SIZE);
+// }
 
 static void sdl_video_update()
 {
@@ -373,7 +728,7 @@ static int sdl_control_update(SDL_Keycode keystate)
         if (f)
         {
           uint8 buf[STATE_SIZE];
-          fread(&buf, STATE_SIZE, 1, f);
+          safe_fread(&buf, STATE_SIZE, 1, f);
           state_load(buf);
           fclose(f);
         }
@@ -700,18 +1055,28 @@ int sdl_input_update(void)
 }
 
 
-int main (int argc, char **argv)
+int main(int argc, char **argv)
 {
   FILE *fp;
   int running = 1;
+  int headless = 0;
 
-  /* Print help if no game specified */
-  if(argc < 2)
+  /* Parse command-line arguments */
+  if (argc < 2)
   {
-    char caption[256];
-    sprintf(caption, "Genesis Plus GX\\SDL\nusage: %s gamename\n", argv[0]);
-    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "Information", caption, sdl_video.window);
+    printf("Genesis Plus GX\nUsage: %s [--headless] gamename\n", argv[0]);
     return 1;
+  }
+
+  /* Check for headless flag */
+  if (strcmp(argv[1], "--headless") == 0)
+  {
+    headless = 1;
+    if (argc < 3)
+    {
+      printf("Genesis Plus GX\nUsage: %s --headless gamename\n", argv[0]);
+      return 1;
+    }
   }
 
   /* set default config */
@@ -729,7 +1094,7 @@ int main (int argc, char **argv)
     int i;
 
     /* read BOOT ROM */
-    fread(boot_rom, 1, 0x800, fp);
+    safe_fread(boot_rom, 1, 0x800, fp);
     fclose(fp);
 
     /* check BOOT ROM */
@@ -749,39 +1114,78 @@ int main (int argc, char **argv)
   }
 
   /* initialize SDL */
-  if(SDL_Init(0) < 0)
+  /* Initialize video */
+  if (headless)
+    {
+        if (!headless_video_init())
+        {
+            fprintf(stderr, "Headless video initialization failed\n");
+            return 1;
+        }
+        if (!setup_shared_memory())
+        {
+            fprintf(stderr, "Shared memory setup failed\n");
+            return 1;
+        }
+        if (!setup_input_shared_memory())
+        {
+            fprintf(stderr, "Input shared memory setup failed\n");
+            return 1;
+        }
+        if (!setup_control_shared_memory())
+        {
+            fprintf(stderr, "Control shared memory setup failed\n");
+            return 1;
+        }
+        if (!setup_sound_shared_memory())
+        {
+            fprintf(stderr, "Sound shared memory setup failed\n");
+            return 1;
+        }
+    }
+  else
   {
-    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Error", "SDL initialization failed", sdl_video.window);
-    return 1;
+    if (SDL_Init(0) < 0)
+    {
+      fprintf(stderr, "SDL initialization failed\n");
+      return 1;
+    }
+    sdl_video_init();
+    if (use_sound) sdl_sound_init();
+    sdl_sync_init();
   }
-  sdl_video_init();
-  if (use_sound) sdl_sound_init();
-  sdl_sync_init();
 
-  /* initialize Genesis virtual system */
-  SDL_LockSurface(sdl_video.surf_bitmap);
-  memset(&bitmap, 0, sizeof(t_bitmap));
-  bitmap.width        = 720;
-  bitmap.height       = 576;
-#if defined(USE_8BPP_RENDERING)
-  bitmap.pitch        = (bitmap.width * 1);
-#elif defined(USE_15BPP_RENDERING)
-  bitmap.pitch        = (bitmap.width * 2);
-#elif defined(USE_16BPP_RENDERING)
-  bitmap.pitch        = (bitmap.width * 2);
-#elif defined(USE_32BPP_RENDERING)
-  bitmap.pitch        = (bitmap.width * 4);
-#endif
-  bitmap.data         = sdl_video.surf_bitmap->pixels;
-  SDL_UnlockSurface(sdl_video.surf_bitmap);
-  bitmap.viewport.changed = 3;
-
-  /* Load game file */
-  if(!load_rom(argv[1]))
+/* initialize Genesis virtual system */
+  if (!headless)
   {
-    char caption[256];
-    sprintf(caption, "Error loading file `%s'.", argv[1]);
-    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Error", caption, sdl_video.window);
+    SDL_LockSurface(sdl_video.surf_bitmap);
+    memset(&bitmap, 0, sizeof(t_bitmap));
+    bitmap.width        = 720;
+    bitmap.height       = 576;
+#if defined(USE_8BPP_RENDERING)
+    bitmap.pitch        = (bitmap.width * 1);
+#elif defined(USE_15BPP_RENDERING)
+    bitmap.pitch        = (bitmap.width * 2);
+#elif defined(USE_16BPP_RENDERING)
+    bitmap.pitch        = (bitmap.width * 2);
+#elif defined(USE_32BPP_RENDERING)
+    bitmap.pitch        = (bitmap.width * 4);
+#endif
+    bitmap.data         = sdl_video.surf_bitmap->pixels;
+    SDL_UnlockSurface(sdl_video.surf_bitmap);
+  }
+  bitmap.viewport.changed = 3;
+  /* Load game file */
+  // if(!load_rom(argv[1]))
+  // {
+  //   char caption[256];
+  //   sprintf(caption, "Error loading file `%s'.", argv[1]);
+  //   SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Error", caption, sdl_video.window);
+  //   return 1;
+  // }
+  if(!load_rom(argv[headless ? 2 : 1]))
+  {
+    fprintf(stderr, "Error loading file '%s'\n", argv[headless ? 2 : 1]);
     return 1;
   }
 
@@ -796,7 +1200,7 @@ int main (int argc, char **argv)
     fp = fopen("./scd.brm", "rb");
     if (fp!=NULL)
     {
-      fread(scd.bram, 0x2000, 1, fp);
+      safe_fread(scd.bram, 0x2000, 1, fp);
       fclose(fp);
     }
 
@@ -820,7 +1224,7 @@ int main (int argc, char **argv)
       fp = fopen("./cart.brm", "rb");
       if (fp!=NULL)
       {
-        fread(scd.cartridge.area, scd.cartridge.mask + 1, 1, fp);
+        safe_fread(scd.cartridge.area, scd.cartridge.mask + 1, 1, fp);
         fclose(fp);
       }
 
@@ -846,13 +1250,21 @@ int main (int argc, char **argv)
     fp = fopen("./game.srm", "rb");
     if (fp!=NULL)
     {
-      fread(sram.sram,0x10000,1, fp);
+      safe_fread(sram.sram,0x10000,1, fp);
       fclose(fp);
     }
   }
 
   /* reset system hardware */
   system_reset();
+
+  if (!headless)
+  {
+    if (use_sound) SDL_PauseAudio(0);
+    if (sdl_sync.sem_sync)
+      SDL_AddTimer(vdp_pal ? 60 : 50, sdl_sync_timer_callback, NULL);
+  }
+
 
   if(use_sound) SDL_PauseAudio(0);
 
@@ -861,68 +1273,43 @@ int main (int argc, char **argv)
     SDL_AddTimer(vdp_pal ? 60 : 50, sdl_sync_timer_callback, NULL);
 
   /* emulation loop */
-  while(running)
+  while (running)
   {
-    SDL_Event event;
-    if (SDL_PollEvent(&event))
+    if (headless) {
+    headless_main_loop();
+    } 
+    else
     {
-      switch(event.type)
+      /* Original SDL mode */
+      SDL_Event event;
+      if (SDL_PollEvent(&event))
       {
-        case SDL_USEREVENT:
+        switch(event.type)
         {
-          char caption[100];
-          sprintf(caption,"Genesis Plus GX - %d fps - %s", event.user.code, (rominfo.international[0] != 0x20) ? rominfo.international : rominfo.domestic);
-          SDL_SetWindowTitle(sdl_video.window, caption);
-          break;
-        }
-
-        case SDL_QUIT:
-        {
-          running = 0;
-          break;
-        }
-
-        case SDL_KEYDOWN:
-        {
-          running = sdl_control_update(event.key.keysym.sym);
-          break;
+          case SDL_USEREVENT:
+          {
+            char caption[100];
+            sprintf(caption, "Genesis Plus GX - %d fps - %s", event.user.code, (rominfo.international[0] != 0x20) ? rominfo.international : rominfo.domestic);
+            SDL_SetWindowTitle(sdl_video.window, caption);
+            break;
+          }
+          case SDL_QUIT:
+          {
+            running = 0;
+            break;
+          }
+          case SDL_KEYDOWN:
+          {
+            running = sdl_control_update(event.key.keysym.sym);
+            break;
+          }
         }
       }
-    }
-
-    sdl_video_update();
-    sdl_sound_update(use_sound);
-
-    if(!turbo_mode && sdl_sync.sem_sync && sdl_video.frames_rendered % 3 == 0)
-    {
-      SDL_SemWait(sdl_sync.sem_sync);
-    }
-  }
-
-  if (system_hw == SYSTEM_MCD)
-  {
-    /* save internal backup RAM (if formatted) */
-    if (!memcmp(scd.bram + 0x2000 - 0x20, brm_format + 0x20, 0x20))
-    {
-      fp = fopen("./scd.brm", "wb");
-      if (fp!=NULL)
+      sdl_video_update();
+      sdl_sound_update(use_sound);
+      if(!turbo_mode && sdl_sync.sem_sync && sdl_video.frames_rendered % 3 == 0)
       {
-        fwrite(scd.bram, 0x2000, 1, fp);
-        fclose(fp);
-      }
-    }
-
-    /* save cartridge backup RAM (if formatted) */
-    if (scd.cartridge.id)
-    {
-      if (!memcmp(scd.cartridge.area + scd.cartridge.mask + 1 - 0x20, brm_format + 0x20, 0x20))
-      {
-        fp = fopen("./cart.brm", "wb");
-        if (fp!=NULL)
-        {
-          fwrite(scd.cartridge.area, scd.cartridge.mask + 1, 1, fp);
-          fclose(fp);
-        }
+        SDL_SemWait(sdl_sync.sem_sync);
       }
     }
   }
@@ -936,6 +1323,25 @@ int main (int argc, char **argv)
       fwrite(sram.sram,0x10000,1, fp);
       fclose(fp);
     }
+  }
+
+  if (control_shared_mem_ptr) {
+    munmap(control_shared_mem_ptr, CONTROL_SIZE);
+    shm_unlink(CONTROL_SHARED_MEM_NAME);
+  }
+
+  if (sound_shared_mem_ptr) {
+            munmap(sound_shared_mem_ptr, sizeof(sound_shared_mem_t));
+            shm_unlink(SOUND_SHARED_MEM_NAME);
+  }
+
+
+  if (!headless)
+  {
+    sdl_video_close();
+    sdl_sound_close();
+    sdl_sync_close();
+    SDL_Quit();
   }
 
   audio_shutdown();
