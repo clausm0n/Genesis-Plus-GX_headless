@@ -177,6 +177,11 @@
 
 #define TL_BITS    14 /* channel output */
 
+static int is_sfx_channel[6] = {0, 0, 1, 1, 1, 1}; // Assume channels 2-5 are for SFX
+
+/* shared channel memory pointer*/
+extern int *channel_control_shared_mem_ptr;
+
 /*  TL_TAB_LEN is calculated as:
 *   13 - sinus amplitude bits     (Y axis)
 *   2  - sinus sign bit           (Y axis)
@@ -203,6 +208,7 @@ static const UINT32 sl_table[16]={
  SC( 8),SC( 9),SC(10),SC(11),SC(12),SC(13),SC(14),SC(31)
 };
 #undef SC
+
 
 
 #define RATE_STEPS (8)
@@ -2043,6 +2049,8 @@ void YM2612Update(int *buffer, int length)
     out_fm[4] = 0;
     out_fm[5] = 0;
 
+    lt = rt = 0;
+
     /* update SSG-EG output */
     update_ssg_eg_channels(&ym2612.CH[0]);
 
@@ -2079,6 +2087,12 @@ void YM2612Update(int *buffer, int length)
       advance_eg_channels(&ym2612.CH[0], ym2612.OPN.eg_cnt);
     }
 
+    for (int ch = 0; ch < 6; ch++) {
+      if (channel_control_shared_mem_ptr[ch + 4]) {  // YM2612 channels start at index 4
+        chan_calc(&ym2612.CH[ch], 1);
+      }
+    }
+
     /* channels accumulator output clipping (14-bit max) */
     if (out_fm[0] > 8191) out_fm[0] = 8191;
     else if (out_fm[0] < -8192) out_fm[0] = -8192;
@@ -2106,6 +2120,13 @@ void YM2612Update(int *buffer, int length)
     rt += ((out_fm[4]) & ym2612.OPN.pan[9]);
     lt += ((out_fm[5]) & ym2612.OPN.pan[10]);
     rt += ((out_fm[5]) & ym2612.OPN.pan[11]);
+    lt = rt = 0;
+    for (int ch = 0; ch < 6; ch++) {
+      if (channel_control_shared_mem_ptr[ch + 4]) {
+        lt += ((out_fm[ch]) & ym2612.OPN.pan[ch*2]);
+        rt += ((out_fm[ch]) & ym2612.OPN.pan[ch*2+1]);
+      }
+    }
 
     /* discrete YM2612 DAC */
     if (chip_type == YM2612_DISCRETE)

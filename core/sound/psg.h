@@ -43,10 +43,14 @@
 #ifndef _PSG_H_
 #define _PSG_H_
 
+#include <stdbool.h>
+
 typedef enum {
   PSG_DISCRETE,
   PSG_INTEGRATED
 } PSG_TYPE;
+
+extern int *channel_control_shared_mem_ptr;
 
 /* Function prototypes */
 extern void psg_init(PSG_TYPE type);
@@ -56,5 +60,8 @@ extern int psg_context_load(uint8 *state);
 extern void psg_write(unsigned int clocks, unsigned int data);
 extern void psg_config(unsigned int clocks, unsigned int preamp, unsigned int panning);
 extern void psg_end_frame(unsigned int clocks);
+extern void psg_set_sfx_channels(bool ch0, bool ch1, bool ch2, bool noise);
+
+
 
 #endif /* _PSG_H_ */

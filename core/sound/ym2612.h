@@ -15,12 +15,15 @@
 
 #ifndef _H_YM2612_
 #define _H_YM2612_
+#include <stdbool.h>
 
 enum {
   YM2612_DISCRETE = 0,
   YM2612_INTEGRATED,
   YM2612_ENHANCED
 };
+
+extern int *channel_control_shared_mem_ptr;
 
 extern void YM2612Init(void);
 extern void YM2612Config(int type);

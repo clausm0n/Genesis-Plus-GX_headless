@@ -443,27 +443,27 @@ void input_reset(void)
   }
 }
 
-void input_refresh(void)
-{
-  int i;
-  for (i=0; i<MAX_DEVICES; i++)
-  {
-    switch (input.dev[i])
-    {
-      case DEVICE_PAD6B:
-      {
-        gamepad_refresh(i);
-        break;
-      }
+// void input_refresh(void)
+// {
+//   int i;
+//   for (i=0; i<MAX_DEVICES; i++)
+//   {
+//     switch (input.dev[i])
+//     {
+//       case DEVICE_PAD6B:
+//       {
+//         gamepad_refresh(i);
+//         break;
+//       }
 
-      case DEVICE_LIGHTGUN:
-      {
-        lightgun_refresh(i);
-        break;
-      }
-    }
-  }
-}
+//       case DEVICE_LIGHTGUN:
+//       {
+//         lightgun_refresh(i);
+//         break;
+//       }
+//     }
+//   }
+// }
 
 void input_end_frame(unsigned int cycles)
 {

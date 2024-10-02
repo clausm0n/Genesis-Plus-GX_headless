@@ -21,6 +21,9 @@
 #define SOUND_BUFFER_SIZE (SOUND_SAMPLES_SIZE * SOUND_CHANNELS)
 #define SOUND_FREQUENCY 48000
 
+#define CHANNEL_CONTROL_SHARED_MEM_NAME "/genesis_channel"
+#define CHANNEL_CONTROL_SIZE (sizeof(int) * 16)  // Assuming 16 channels max
+
 #define FRAME_RATE 60
 #define FRAME_TIME_US (1000000 / FRAME_RATE)
 #define FRAME_WIDTH 320
@@ -43,6 +46,7 @@
 
 // Function prototypes
 static int setup_input_shared_memory(void);
+static int setup_channel_control_shared_memory(void);
 void input_refresh(void);  // Declare the input_refresh function
 static void read_external_input(void);
 static void output_frame_data(void);
@@ -59,6 +63,9 @@ static void *input_shared_mem_ptr;
 
 static int control_shared_mem_fd;
 static void *control_shared_mem_ptr;
+
+static int channel_control_shared_mem_fd;
+int *channel_control_shared_mem_ptr;
 
 int joynum = 0;
 
@@ -476,6 +483,32 @@ static int setup_input_shared_memory() {
   }
   
   return 1;
+}
+
+static int setup_channel_control_shared_memory() {
+    channel_control_shared_mem_fd = shm_open(CHANNEL_CONTROL_SHARED_MEM_NAME, O_CREAT | O_RDWR, 0666);
+    if (channel_control_shared_mem_fd == -1) {
+        perror("shm_open for channel control");
+        return 0;
+    }
+
+    if (ftruncate(channel_control_shared_mem_fd, CHANNEL_CONTROL_SIZE) == -1) {
+        perror("ftruncate for channel control");
+        return 0;
+    }
+
+    channel_control_shared_mem_ptr = mmap(0, CHANNEL_CONTROL_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, channel_control_shared_mem_fd, 0);
+    if (channel_control_shared_mem_ptr == MAP_FAILED) {
+        perror("mmap for channel control");
+        return 0;
+    }
+
+    // Initialize all channels to enabled (1)
+    for (int i = 0; i < 16; i++) {
+        channel_control_shared_mem_ptr[i] = 1;
+    }
+
+    return 1;
 }
 
 static void read_external_input() {
@@ -1142,6 +1175,10 @@ int main(int argc, char **argv)
             fprintf(stderr, "Sound shared memory setup failed\n");
             return 1;
         }
+        if (!setup_channel_control_shared_memory()) {
+            fprintf(stderr, "Channel control shared memory setup failed\n");
+            return 1;
+        }
     }
   else
   {
@@ -1331,8 +1368,13 @@ int main(int argc, char **argv)
   }
 
   if (sound_shared_mem_ptr) {
-            munmap(sound_shared_mem_ptr, sizeof(sound_shared_mem_t));
-            shm_unlink(SOUND_SHARED_MEM_NAME);
+    munmap(sound_shared_mem_ptr, sizeof(sound_shared_mem_t));
+    shm_unlink(SOUND_SHARED_MEM_NAME);
+  }
+
+  if (channel_control_shared_mem_ptr) {
+    munmap(channel_control_shared_mem_ptr, CHANNEL_CONTROL_SIZE);
+    shm_unlink(CHANNEL_CONTROL_SHARED_MEM_NAME);
   }
 
 

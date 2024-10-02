@@ -42,6 +42,10 @@
 
 #include "shared.h"
 #include "blip_buf.h"
+#include <stdbool.h>
+
+/* Add shared memory pointer for channel controls*/
+extern int *channel_control_shared_mem_ptr;
 
 /* internal clock = input clock : 16 = (master clock : 15) : 16 */
 #define PSG_MCYCLES_RATIO (15*16)
@@ -89,6 +93,7 @@ static struct
   int chanDelta[4][2];
   int chanOut[4][2];
   int chanAmp[4][2];
+  bool is_sfx_channel[4];
 } psg;
 
 static void psg_update(unsigned int clocks);
@@ -110,6 +115,7 @@ void psg_init(PSG_TYPE type)
   /* Initialize Noise LSFR type */
   psg.noiseShiftWidth = noiseShiftWidth[type];
   psg.noiseBitMask = noiseBitMask[type];
+  psg_set_sfx_channels(false, true, true, true);
 }
 
 void psg_reset(void)
@@ -247,128 +253,132 @@ void psg_write(unsigned int clocks, unsigned int data)
     index= psg.latch;
   }
 
-  switch (index)
+  if (psg.is_sfx_channel[index >> 1] || index == 6)  // Always allow noise control register
   {
-    case 0:
-    case 2:
-    case 4: /* Tone channels frequency */
+
+    switch (index)
     {
-      /* recalculate frequency register value */
-      if (data & 0x80)
+      case 0:
+      case 2:
+      case 4: /* Tone channels frequency */
       {
-        /* update 10-bit register LSB (1---xxxx)  */
-        data = (psg.regs[index] & 0x3f0) | (data & 0x0f);
-      }
-      else
-      {
-        /* update 10-bit register MSB (0-xxxxxx)  */
-        data = (psg.regs[index] & 0x00f) | ((data & 0x3f) << 4);
-      }
+        /* recalculate frequency register value */
+        if (data & 0x80)
+        {
+          /* update 10-bit register LSB (1---xxxx)  */
+          data = (psg.regs[index] & 0x3f0) | (data & 0x0f);
+        }
+        else
+        {
+          /* update 10-bit register MSB (0-xxxxxx)  */
+          data = (psg.regs[index] & 0x00f) | ((data & 0x3f) << 4);
+        }
 
-      /* update channel M-cycle counter increment */
-      if (data)
-      {
-        psg.freqInc[index>>1] = data * PSG_MCYCLES_RATIO;
-      }
-      else
-      {
-        /* zero value behaves the same as a value of 1 on integrated version (0x400 on discrete version) */
-        psg.freqInc[index>>1] = psg.zeroFreqInc;
-      }
+        /* update channel M-cycle counter increment */
+        if (data)
+        {
+          psg.freqInc[index>>1] = data * PSG_MCYCLES_RATIO;
+        }
+        else
+        {
+          /* zero value behaves the same as a value of 1 on integrated version (0x400 on discrete version) */
+          psg.freqInc[index>>1] = psg.zeroFreqInc;
+        }
 
-      /* update noise channel counter increment if required */
-      if ((index == 4) && ((psg.regs[6] & 0x03) == 0x03))
-      {
-        psg.freqInc[3] = psg.freqInc[2];
-      }
+        /* update noise channel counter increment if required */
+        if ((index == 4) && ((psg.regs[6] & 0x03) == 0x03))
+        {
+          psg.freqInc[3] = psg.freqInc[2];
+        }
 
-      break;
-    }
-
-    case 6: /* Noise control */
-    {
-      /* noise signal generator frequency (-----?xx) */
-      int noiseFreq = (data & 0x03);
-
-      if (noiseFreq == 0x03)
-      {
-        /* noise generator is controlled by tone channel #3 generator */
-        psg.freqInc[3] = psg.freqInc[2];
-        psg.freqCounter[3] = psg.freqCounter[2];
-      }
-      else
-      {
-        /* noise generator is running at separate frequency */
-        psg.freqInc[3] = (0x10 << noiseFreq) * PSG_MCYCLES_RATIO;
+        break;
       }
 
-      /* check current noise shift register output */
-      if (psg.noiseShiftValue & 1)
+      case 6: /* Noise control */
       {
-        /* high to low transition will be applied at next internal cycle update */
-        psg.chanDelta[3][0] -= psg.chanOut[3][0];
-        psg.chanDelta[3][1] -= psg.chanOut[3][1];
+        /* noise signal generator frequency (-----?xx) */
+        int noiseFreq = (data & 0x03);
+
+        if (noiseFreq == 0x03)
+        {
+          /* noise generator is controlled by tone channel #3 generator */
+          psg.freqInc[3] = psg.freqInc[2];
+          psg.freqCounter[3] = psg.freqCounter[2];
+        }
+        else
+        {
+          /* noise generator is running at separate frequency */
+          psg.freqInc[3] = (0x10 << noiseFreq) * PSG_MCYCLES_RATIO;
+        }
+
+        /* check current noise shift register output */
+        if (psg.noiseShiftValue & 1)
+        {
+          /* high to low transition will be applied at next internal cycle update */
+          psg.chanDelta[3][0] -= psg.chanOut[3][0];
+          psg.chanDelta[3][1] -= psg.chanOut[3][1];
+        }
+
+        /* reset noise shift register value (noise channel output is forced low) */
+        psg.noiseShiftValue = 1 << psg.noiseShiftWidth;;
+
+        break;
       }
 
-      /* reset noise shift register value (noise channel output is forced low) */
-      psg.noiseShiftValue = 1 << psg.noiseShiftWidth;;
-
-      break;
-    }
-
-    case 7: /* Noise channel attenuation */
-    {
-      int chanOut[2];
-
-      /* convert 4-bit attenuation value (----xxxx) to 16-bit volume value */
-      data = chanVolume[data & 0x0f];
-
-      /* channel pre-amplification */
-      chanOut[0] = (data * psg.chanAmp[3][0]) / 100;
-      chanOut[1] = (data * psg.chanAmp[3][1]) / 100;
-
-      /* check noise shift register output */
-      if (psg.noiseShiftValue & 1)
+      case 7: /* Noise channel attenuation */
       {
-        /* channel output is high, volume variation will be applied at next internal cycle update */
-        psg.chanDelta[3][0] += (chanOut[0] - psg.chanOut[3][0]);
-        psg.chanDelta[3][1] += (chanOut[1] - psg.chanOut[3][1]);
+        int chanOut[2];
+
+        /* convert 4-bit attenuation value (----xxxx) to 16-bit volume value */
+        data = chanVolume[data & 0x0f];
+
+        /* channel pre-amplification */
+        chanOut[0] = (data * psg.chanAmp[3][0]) / 100;
+        chanOut[1] = (data * psg.chanAmp[3][1]) / 100;
+
+        /* check noise shift register output */
+        if (psg.noiseShiftValue & 1)
+        {
+          /* channel output is high, volume variation will be applied at next internal cycle update */
+          psg.chanDelta[3][0] += (chanOut[0] - psg.chanOut[3][0]);
+          psg.chanDelta[3][1] += (chanOut[1] - psg.chanOut[3][1]);
+        }
+
+        /* update channel volume */
+        psg.chanOut[3][0] = chanOut[0];
+        psg.chanOut[3][1] = chanOut[1];
+
+        break;
       }
 
-      /* update channel volume */
-      psg.chanOut[3][0] = chanOut[0];
-      psg.chanOut[3][1] = chanOut[1];
-
-      break;
-    }
-
-    default: /* Tone channels attenuation */
-    {
-      int chanOut[2];
-
-      /* channel number (0-2) */
-      int i = index >> 1;
-
-      /* convert 4-bit attenuation value (----xxxx) to 16-bit volume value */
-      data = chanVolume[data & 0x0f];
-
-      /* channel pre-amplification */
-      chanOut[0] = (data * psg.chanAmp[i][0]) / 100;
-      chanOut[1] = (data * psg.chanAmp[i][1]) / 100;
-
-      /* check tone generator polarity */
-      if (psg.polarity[i] > 0)
+      default: /* Tone channels attenuation */
       {
-        /* channel output is high, volume variation will be applied at next internal cycle update */
-        psg.chanDelta[i][0] += (chanOut[0] - psg.chanOut[i][0]);
-        psg.chanDelta[i][1] += (chanOut[1] - psg.chanOut[i][1]);
+        int chanOut[2];
+
+        /* channel number (0-2) */
+        int i = index >> 1;
+
+        /* convert 4-bit attenuation value (----xxxx) to 16-bit volume value */
+        data = chanVolume[data & 0x0f];
+
+        /* channel pre-amplification */
+        chanOut[0] = (data * psg.chanAmp[i][0]) / 100;
+        chanOut[1] = (data * psg.chanAmp[i][1]) / 100;
+
+        /* check tone generator polarity */
+        if (psg.polarity[i] > 0)
+        {
+          /* channel output is high, volume variation will be applied at next internal cycle update */
+          psg.chanDelta[i][0] += (chanOut[0] - psg.chanOut[i][0]);
+          psg.chanDelta[i][1] += (chanOut[1] - psg.chanOut[i][1]);
+        }
+
+        /* update channel volume */
+        psg.chanOut[i][0] = chanOut[0];
+        psg.chanOut[i][1] = chanOut[1];
+
+        break;
       }
-
-      /* update channel volume */
-      psg.chanOut[i][0] = chanOut[0];
-      psg.chanOut[i][1] = chanOut[1];
-
-      break;
     }
   }
 
@@ -452,12 +462,27 @@ void psg_end_frame(unsigned int clocks)
   }
 }
 
+void psg_set_sfx_channels(bool ch0, bool ch1, bool ch2, bool noise)
+{
+  psg.is_sfx_channel[0] = ch0;
+  psg.is_sfx_channel[1] = ch1;
+  psg.is_sfx_channel[2] = ch2;
+  psg.is_sfx_channel[3] = noise;
+}
+
 static void psg_update(unsigned int clocks)
 {
   int i, timestamp, polarity;
 
+  
+
   for (i=0; i<4; i++)
   {
+    // Only process SFX channels present in the shared memory
+    if (!channel_control_shared_mem_ptr[i])
+    {
+      continue;
+    }
     /* apply any pending channel volume variations */
     if (psg.chanDelta[i][0] | psg.chanDelta[i][1])
     {
