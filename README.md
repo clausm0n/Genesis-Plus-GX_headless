@@ -1,35 +1,80 @@
-Genesis Plus GX is an open-source Sega 8/16 bit emulator focused on accuracy and portability. Initially ported and developped on Gamecube / Wii consoles through [libogc / devkitPPC](http://sourceforge.net/projects/devkitpro/), this emulator is now available on many other platforms through various frontends such as:
+# Genesis Plus GX Headless
 
-* [Retroarch (libretro)](http://www.libretro.com)
+This is a fork of the Genesis Plus GX emulator, modified to run as a headless console application that exposes shared memory for external programs to access. This version allows for easy integration with other applications, making it suitable for various use cases such as game analysis, AI training, or custom frontend development.
 
-* [Bizhawk](http://tasvideos.org/Bizhawk.html)
+## Features
 
-* [OpenEmu](http://openemu.org/)
+- Headless operation (no GUI)
+- Shared memory interfaces for video, audio, and input
+- Support for Sega Genesis/Mega Drive, Sega CD, and Master System
+- High compatibility and accuracy
 
-----
+## Building
 
-The source code, initially based on Genesis Plus 1.2a by [Charles MacDonald](http://www.techno-junk.org/ ) has been heavily modified & enhanced, with respect to original goals and design, in order to improve emulation accuracy as well as adding support for new peripherals, cartridge or console hardware and many other exciting [features](https://github.com/ekeeke/Genesis-Plus-GX/blob/master/wiki/Features.md).
+To build the emulator, you'll need GCC and standard development libraries. Follow these steps:
 
-The result is that Genesis Plus GX is now more a continuation of the original project than a simple port, providing very accurate emulation and [100% compatibility](https://github.com/ekeeke/Genesis-Plus-GX/blob/master/wiki/Compatibility.md) with Genesis / Mega Drive, Sega/Mega CD, Master System, Game Gear & SG-1000 released software (including all unlicensed or pirate known dumps), also emulating backwards compatibility modes when available. All the people who contributed (directly or indirectly) to this project are listed on the [Credits](https://github.com/ekeeke/Genesis-Plus-GX/blob/master/wiki/Credits.md) page.
+1. Clone this repository
+2. Navigate to the project directory
+3. Run `make -f MakeFile.headless`
 
-----
+The build process will create an executable named `gx_headless` in the project directory.
 
-Multi-platform sourcecode (core), which is made available for use under a specific non-commercial [license](https://github.com/ekeeke/Genesis-Plus-GX/blob/master/LICENSE.txt), is maintained on [Bitbucket](https://bitbucket.org/eke/genesis-plus-gx/src/) / [Github](https://github.com/ekeeke/Genesis-Plus-GX) so that other Genesis Plus ports can benefit of it, as I really wish this emulator becomes a reference for _portable_ and _accurate_ Sega 8/16-bit emulation. If you ported this emulator to other platforms or need help porting it, feel free to contact me.
+## Usage
 
-----
+Run the emulator from the command line:
 
-Latest official Gamecube / Wii standalone port (screenshots below) is available [here](https://github.com/ekeeke/Genesis-Plus-GX/tree/master/builds). Be sure to check the included [user manual](https://github.com/ekeeke/Genesis-Plus-GX/blob/master/gx/docs/README.pdf) first. A [startup guide](https://github.com/ekeeke/Genesis-Plus-GX/blob/master/wiki/Getting%20Started.md) and a [FAQ](https://github.com/ekeeke/Genesis-Plus-GX/blob/master/wiki/Frequently%20Asked%20Questions.md) are also available.
+```
+./gx_headless <path_to_rom>
+```
+## Shared Memory Interfaces
 
-![MainMenu.png](https://bitbucket.org/repo/7AjE6M/images/3565283297-MainMenu.png)
-![menu_load.png](https://bitbucket.org/repo/7AjE6M/images/164055790-menu_load.png)
+The emulator exposes several shared memory segments for external applications to interact with:
 
-![RomBrowser.png](https://bitbucket.org/repo/7AjE6M/images/1972035547-RomBrowser.png)
-![CtrlMenu.png](https://bitbucket.org/repo/7AjE6M/images/2283464354-CtrlMenu.png)
+1. Video Frame Data: `/genesis_frame`
+   - Size: 320x240x4 bytes (RGBA format)
+   - Updated every frame
 
-----
+2. Audio Data: `/genesis_sound`
+   - Structure: `sound_shared_mem_t`
+   - Contains latest audio samples
 
-You can also test latest compiled builds for Gamecube / Wii and Retroarch (Windows 32-bit version only) by downloading them from [here](https://github.com/ekeeke/Genesis-Plus-GX/tree/master/builds).
+3. Input Data: `/genesis_input`
+   - Size: 2 bytes (16-bit integer)
+   - Write to this to send input to the emulator
 
-----
+4. Control Commands: `/genesis_control`
+   - Size: 4 bytes (32-bit integer)
+   - Used for save states, loading states, and reset commands
 
-[![btn_donate_LG.gif](https://www.paypalobjects.com/en_US/i/btn/btn_donate_LG.gif)](https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=2966212) If you like this project and want to show your appreciation, Paypal donations are always welcomed.
+5. Audio Channel Control:
+   - PSG Channels: `/genesis_psg_channels`
+   - YM2612 Channels: `/genesis_ym2612_channels`
+   - YM2413 Channels: `/genesis_ym2413_channels`
+   - Each is 64 bytes (16 int32 values)
+
+## Key Functions
+
+- `setup_shared_memory()`: Initializes shared memory for video frames
+- `setup_sound_shared_memory()`: Sets up shared memory for audio data
+- `setup_input_shared_memory()`: Creates shared memory for input data
+- `setup_control_shared_memory()`: Establishes shared memory for control commands
+- `output_frame_data()`: Writes the current frame to shared memory
+- `output_sound_data()`: Outputs audio samples to shared memory
+- `handle_control_commands()`: Processes control commands (save/load state, reset)
+
+## External Integration
+
+To integrate with this emulator:
+
+1. Open the shared memory segments in your application
+2. Read frame data and audio samples as needed
+3. Write input data to control the emulator
+4. Use control commands for save states and resets
+
+## License
+
+This project is licensed under the same terms as the original Genesis Plus GX emulator. Please refer to the original project for more details. 
+
+## Acknowledgments
+
+This fork is based on the excellent work of the Genesis Plus GX team. All credit for the core emulation goes to them.
