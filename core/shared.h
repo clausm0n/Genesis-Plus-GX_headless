@@ -37,5 +37,9 @@
 #include "svp.h"
 #include "state.h"
 
+extern int *psg_channel_shared_mem_ptr;
+extern int *ym2612_channel_shared_mem_ptr;
+extern int *ym2413_channel_shared_mem_ptr;
+
 #endif /* _SHARED_H_ */
 

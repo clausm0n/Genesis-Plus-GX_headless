@@ -179,9 +179,6 @@
 
 static int is_sfx_channel[6] = {0, 0, 1, 1, 1, 1}; // Assume channels 2-5 are for SFX
 
-/* shared channel memory pointer*/
-extern int *channel_control_shared_mem_ptr;
-
 /*  TL_TAB_LEN is calculated as:
 *   13 - sinus amplitude bits     (Y axis)
 *   2  - sinus sign bit           (Y axis)
@@ -2057,7 +2054,16 @@ void YM2612Update(int *buffer, int length)
     /* calculate FM */
     if (!ym2612.dacen)
     {
-      chan_calc(&ym2612.CH[0],6);
+      for (int ch = 0; ch < 6; ch++) {
+        if (ym2612_channel_shared_mem_ptr[ch + 4]) {  // YM2612 channels start at index 4
+          chan_calc(&ym2612.CH[ch], 1);
+        } else {
+          // Zero out disabled channels
+          ym2612.CH[ch].op1_out[0] = 0;
+          ym2612.CH[ch].op1_out[1] = 0;
+          ym2612.CH[ch].mem_value = 0;
+        }
+      }
     }
     else
     {
@@ -2088,7 +2094,7 @@ void YM2612Update(int *buffer, int length)
     }
 
     for (int ch = 0; ch < 6; ch++) {
-      if (channel_control_shared_mem_ptr[ch + 4]) {  // YM2612 channels start at index 4
+      if (ym2612_channel_shared_mem_ptr[ch + 4]) {  // YM2612 channels start at index 4
         chan_calc(&ym2612.CH[ch], 1);
       }
     }
@@ -2122,7 +2128,7 @@ void YM2612Update(int *buffer, int length)
     rt += ((out_fm[5]) & ym2612.OPN.pan[11]);
     lt = rt = 0;
     for (int ch = 0; ch < 6; ch++) {
-      if (channel_control_shared_mem_ptr[ch + 4]) {
+      if (ym2612_channel_shared_mem_ptr[ch + 4]) {
         lt += ((out_fm[ch]) & ym2612.OPN.pan[ch*2]);
         rt += ((out_fm[ch]) & ym2612.OPN.pan[ch*2+1]);
       }

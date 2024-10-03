@@ -50,8 +50,6 @@ typedef enum {
   PSG_INTEGRATED
 } PSG_TYPE;
 
-extern int *channel_control_shared_mem_ptr;
-
 /* Function prototypes */
 extern void psg_init(PSG_TYPE type);
 extern void psg_reset(void);

@@ -23,8 +23,6 @@ enum {
   YM2612_ENHANCED
 };
 
-extern int *channel_control_shared_mem_ptr;
-
 extern void YM2612Init(void);
 extern void YM2612Config(int type);
 extern void YM2612ResetChip(void);

@@ -517,8 +517,6 @@ static void read_external_input() {
     input.pad[0] = pad_data;  // Assuming we're only handling player 1 input
 }
 
-
-
 static int setup_shared_memory() {
   shared_mem_fd = shm_open(SHARED_MEM_NAME, O_CREAT | O_RDWR, 0666);
   if (shared_mem_fd == -1) {

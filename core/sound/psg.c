@@ -44,9 +44,6 @@
 #include "blip_buf.h"
 #include <stdbool.h>
 
-/* Add shared memory pointer for channel controls*/
-extern int *channel_control_shared_mem_ptr;
-
 /* internal clock = input clock : 16 = (master clock : 15) : 16 */
 #define PSG_MCYCLES_RATIO (15*16)
 
@@ -474,13 +471,16 @@ static void psg_update(unsigned int clocks)
 {
   int i, timestamp, polarity;
 
-  
-
   for (i=0; i<4; i++)
   {
-    // Only process SFX channels present in the shared memory
-    if (!channel_control_shared_mem_ptr[i])
+    // Check if the channel is enabled
+    if (!psg_channel_shared_mem_ptr[i])
     {
+      // If channel is disabled, set its output to zero
+      psg.chanOut[i][0] = 0;
+      psg.chanOut[i][1] = 0;
+      psg.chanDelta[i][0] = -psg.chanOut[i][0];
+      psg.chanDelta[i][1] = -psg.chanOut[i][1];
       continue;
     }
     /* apply any pending channel volume variations */
