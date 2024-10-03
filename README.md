@@ -78,3 +78,8 @@ This project is licensed under the same terms as the original Genesis Plus GX em
 ## Acknowledgments
 
 This fork is based on the excellent work of the Genesis Plus GX team. All credit for the core emulation goes to them.
+
+
+## TODO
+
+Refine sound channel isolation logic for psg.c, ym2413.c, ym2612.c 
