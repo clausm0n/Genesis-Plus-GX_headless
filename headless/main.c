@@ -11,7 +11,6 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <time.h>
-#include <linux/time.h>
 #include <stdint.h>
 
 #define SOUND_SHARED_MEM_NAME "/genesis_sound"
@@ -57,7 +56,7 @@ static void read_external_input(void);
 static void output_frame_data(void);
 static void output_sound_data(void);
 
-// Global variable
+// Global variables
 static int running = 1;
 
 static int shared_mem_fd;
@@ -82,7 +81,6 @@ int log_error   = 0;
 int debug_on    = 0;
 int turbo_mode  = 0;
 int use_sound   = 1;
-int fullscreen  = 0; /* SDL_WINDOW_FULLSCREEN */
 
 // Replace fread calls with this function
 static int safe_fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
@@ -214,7 +212,7 @@ static void output_frame_data() {
     int width = 320;
     int height = 224;
     int src_pitch = bitmap.pitch;
-    int bytes_per_pixel = 2;  // 16 bits per pixel (RGB565)
+    int bytes_per_pixel = 2;
 
     for (int y = 0; y < height; y++) {
         for (int x = 0; x < width; x++) {
@@ -239,7 +237,7 @@ static void output_frame_data() {
 }
 
 static void output_sound_data(void) {
-    int num_samples = audio_update(soundframe); // Number of samples per channel
+    int num_samples = audio_update(soundframe);
 
     // Ensure we don't exceed the buffer size
     if (num_samples > SOUND_SAMPLES_SIZE) {

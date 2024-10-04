@@ -77,7 +77,6 @@ to do:
 #define EG_REL      1
 #define EG_OFF      0
 
-
 typedef struct 
 {
   UINT32  ar;       /* attack rate: AR<<2           */
@@ -1603,11 +1602,6 @@ static void OPLLWriteReg(int r, int v)
       if (chan >= 9)
         chan -= 9;  /* verified on real YM2413 */
 
-      if (!ym2413_channel_shared_mem_ptr[chan + 10]) {
-        // Channel is disabled, don't process the write
-        return;
-      }
-
       CH = &ym2413.P_CH[chan];
 
       if(r&0x10)
@@ -1787,7 +1781,7 @@ void YM2413Update(int *buffer, int length)
 {
   int i, out;
 
-  for(i = 0; i < length; i++)
+  for( i=0; i < length ; i++ )
   {
     output[0] = 0;
     output[1] = 0;
@@ -1795,21 +1789,12 @@ void YM2413Update(int *buffer, int length)
     advance_lfo();
 
     /* FM part */
-    for(int ch = 0; ch < 9; ch++)
-    {
-      if(ym2413_channel_shared_mem_ptr[ch])
-      {
-        chan_calc(&ym2413.P_CH[ch]);
-      }
-      else
-      {
-        // Silence disabled channels
-        ym2413.P_CH[ch].SLOT[SLOT1].volume = MAX_ATT_INDEX;
-        ym2413.P_CH[ch].SLOT[SLOT2].volume = MAX_ATT_INDEX;
-        ym2413.P_CH[ch].SLOT[SLOT1].state = EG_OFF;
-        ym2413.P_CH[ch].SLOT[SLOT2].state = EG_OFF;
-      }
-    }
+    chan_calc(&ym2413.P_CH[0]);
+    chan_calc(&ym2413.P_CH[1]);
+    chan_calc(&ym2413.P_CH[2]);
+    chan_calc(&ym2413.P_CH[3]);
+    chan_calc(&ym2413.P_CH[4]);
+    chan_calc(&ym2413.P_CH[5]);
 
     if(!(ym2413.rhythm&0x20))
     {
@@ -1819,20 +1804,10 @@ void YM2413Update(int *buffer, int length)
     }
     else    /* Rhythm part */
     {
-      if (ym2413_channel_shared_mem_ptr[15]) { // Assuming rhythm is controlled by the last channel
-        rhythm_calc(&ym2413.P_CH[0], (ym2413.noise_rng>>0)&1);
-      } else {
-        // Silence rhythm channels
-        for (int rch = 6; rch < 9; rch++) {
-          ym2413.P_CH[rch].SLOT[SLOT1].volume = MAX_ATT_INDEX;
-          ym2413.P_CH[rch].SLOT[SLOT2].volume = MAX_ATT_INDEX;
-          ym2413.P_CH[rch].SLOT[SLOT1].state = EG_OFF;
-          ym2413.P_CH[rch].SLOT[SLOT2].state = EG_OFF;
-        }
-      }
+      rhythm_calc(&ym2413.P_CH[0], (ym2413.noise_rng>>0)&1 );
     }
 
-    /* Melody (MO) & Rhythm (RO) outputs mixing & amplification */
+    /* Melody (MO) & Rythm (RO) outputs mixing & amplification (latched bit controls FM output) */
     out = (output[0] + (output[1] * 2)) * 2 * ym2413.status;
 
     /* Store to stereo sound buffer */
